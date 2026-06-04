@@ -284,7 +284,7 @@ function buildContext(retrieved) {
   return lines.join("\n\n").slice(0, 14000);
 }
 
-function buildSourceTraceInstructions(retrieved) {
+function buildGuaranteedSourceTrace(retrieved) {
   const concepts = retrieved.topRecords
     .slice(0, 5)
     .map(x => `- ${x.record.title}`)
@@ -315,7 +315,6 @@ function buildSourceTraceInstructions(retrieved) {
   const confidence = Math.min(95, 70 + (retrieved.topRecords.length * 4));
 
   return `
-At the end of every answer, include this exact Source Trace format:
 
 Source Trace
 ------------
@@ -332,8 +331,13 @@ Sources:
 ${sources}
 
 Confidence:
-${confidence}%
-`;
+${confidence}%`;
+}
+
+function removeModelSourceTrace(reply) {
+  return String(reply || "")
+    .replace(/source trace[\s\S]*$/i, "")
+    .trim();
 }
 
 const systemPrompt = `
@@ -353,7 +357,7 @@ Rules:
 - Do not invent pricing, customers, certifications, commitments, legal claims, or medical claims.
 - If the retrieved Cortex context does not support the answer, say: "I do not see that in the current Cortex knowledge assets."
 - Do not mention backend, Render, OpenAI, GoDaddy, or implementation details to normal website visitors.
-- Always include the clean Source Trace format requested in the user message.
+- Do not create your own Source Trace section. The backend will append it.
 `;
 
 app.get("/", (req, res) => {
@@ -393,7 +397,6 @@ app.post("/chat", async (req, res) => {
     const cortexData = await loadCortexData();
     const retrieved = retrieve(userMessage, cortexData);
     const context = buildContext(retrieved);
-    const sourceTraceInstructions = buildSourceTraceInstructions(retrieved);
 
     const response = await client.responses.create({
       model,
@@ -407,14 +410,19 @@ app.post("/chat", async (req, res) => {
           content:
             `User Question:\n${userMessage}\n\n` +
             `${context}\n\n` +
-            `Answer using the retrieved Cortex knowledge.\n\n` +
-            `${sourceTraceInstructions}`
+            `Answer using the retrieved Cortex knowledge. Do not include a Source Trace section.`
         }
       ]
     });
 
+    const cleanReply = removeModelSourceTrace(
+      response.output_text || "I am sorry, I could not generate a response."
+    );
+
+    const guaranteedTrace = buildGuaranteedSourceTrace(retrieved);
+
     res.json({
-      reply: response.output_text || "I am sorry, I could not generate a response.",
+      reply: cleanReply + guaranteedTrace,
       sources: retrieved.topRecords.slice(0, 6).map(({ record, score }) => ({
         title: record.title,
         sourceFile: record.sourceFile,
