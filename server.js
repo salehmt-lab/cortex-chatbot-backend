@@ -499,8 +499,8 @@ function buildGuaranteedSourceTrace(retrieved) {
 
     if (!key || conceptSeen.has(key) || isBlockedTraceTitle(title)) return;
 
-    // Only authoritative Cortex answer/governance/relationship sources should appear as trace concepts.
-    // This prevents broad article/page records such as AI Terms Explained from polluting the Source Trace.
+    // Only authoritative Cortex RAG assets should appear as trace concepts.
+    // This removes broad page/article objects such as "AI Terms Explained".
     if (!ALLOWED_TRACE_SOURCES.has(x.record.sourceFile)) return;
 
     conceptSeen.add(key);
@@ -517,6 +517,7 @@ function buildGuaranteedSourceTrace(retrieved) {
     const key = normalize(`${source} ${type} ${target}`);
 
     if (!source || !target || relationshipSeen.has(key)) return;
+
     relationshipSeen.add(key);
     relationships.push(`- ${source} → ${type} → ${target}`);
   });
@@ -532,6 +533,7 @@ function buildGuaranteedSourceTrace(retrieved) {
       const key = normalize(subject);
 
       if (!subject || governanceSeen.has(key)) return;
+
       governanceSeen.add(key);
 
       const values = Array.isArray(impact.values)
@@ -546,10 +548,9 @@ function buildGuaranteedSourceTrace(retrieved) {
 
   retrieved.topRecords.forEach(x => {
     const source = x.record.sourceFile;
-    if (!source || sourceSeen.has(source)) return;
 
-    // Keep listed sources aligned to authoritative trace material first.
-    if (!ALLOWED_TRACE_SOURCES.has(source) && sources.length > 0) return;
+    if (!source || sourceSeen.has(source)) return;
+    if (!ALLOWED_TRACE_SOURCES.has(source)) return;
 
     sourceSeen.add(source);
     sources.push(`- ${source}`);
