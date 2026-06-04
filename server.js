@@ -284,6 +284,58 @@ function buildContext(retrieved) {
   return lines.join("\n\n").slice(0, 14000);
 }
 
+function buildSourceTraceInstructions(retrieved) {
+  const concepts = retrieved.topRecords
+    .slice(0, 5)
+    .map(x => `- ${x.record.title}`)
+    .join("\n") || "- No direct concepts found";
+
+  const relationships = retrieved.relationships
+    .slice(0, 5)
+    .map(rel => `- ${rel.source} → ${rel.type || "related"} → ${rel.target}`)
+    .join("\n") || "- No direct relationships found";
+
+  const governance = retrieved.impacts
+    .slice(0, 5)
+    .map(impact => {
+      const values = Array.isArray(impact.values)
+        ? impact.values.join(", ")
+        : String(impact.values);
+      return `- ${impact.subject}: ${values}`;
+    })
+    .join("\n") || "- No governance impacts found";
+
+  const sources = [
+    ...new Set(retrieved.topRecords.map(x => x.record.sourceFile))
+  ]
+    .slice(0, 6)
+    .map(source => `- ${source}`)
+    .join("\n") || "- No source files found";
+
+  const confidence = Math.min(95, 70 + (retrieved.topRecords.length * 4));
+
+  return `
+At the end of every answer, include this exact Source Trace format:
+
+Source Trace
+------------
+Concepts:
+${concepts}
+
+Relationships:
+${relationships}
+
+Governance:
+${governance}
+
+Sources:
+${sources}
+
+Confidence:
+${confidence}%
+`;
+}
+
 const systemPrompt = `
 You are Cortex AI, the source-grounded assistant for NABDs.AI Cortex 10.
 
@@ -301,8 +353,7 @@ Rules:
 - Do not invent pricing, customers, certifications, commitments, legal claims, or medical claims.
 - If the retrieved Cortex context does not support the answer, say: "I do not see that in the current Cortex knowledge assets."
 - Do not mention backend, Render, OpenAI, GoDaddy, or implementation details to normal website visitors.
-
-At the end, include a short section titled "Source Trace" when relevant.
+- Always include the clean Source Trace format requested in the user message.
 `;
 
 app.get("/", (req, res) => {
@@ -342,6 +393,7 @@ app.post("/chat", async (req, res) => {
     const cortexData = await loadCortexData();
     const retrieved = retrieve(userMessage, cortexData);
     const context = buildContext(retrieved);
+    const sourceTraceInstructions = buildSourceTraceInstructions(retrieved);
 
     const response = await client.responses.create({
       model,
@@ -353,9 +405,10 @@ app.post("/chat", async (req, res) => {
         {
           role: "user",
           content:
-            `User question:\n${userMessage}\n\n` +
+            `User Question:\n${userMessage}\n\n` +
             `${context}\n\n` +
-            `Answer using the retrieved Cortex knowledge. If useful, include Source Trace.`
+            `Answer using the retrieved Cortex knowledge.\n\n` +
+            `${sourceTraceInstructions}`
         }
       ]
     });
