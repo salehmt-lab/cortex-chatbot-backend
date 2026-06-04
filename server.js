@@ -50,9 +50,8 @@ const BLOCKED_TRACE_CONCEPTS = new Set([
   "footer",
   "hero",
   "call to action",
-  "cta"
-
-  "ai terms explained",
+"cta",
+"ai terms explained",
   "knowledge articles",
   "knowledge hub",
   "article learning paths",
@@ -493,7 +492,11 @@ function buildGuaranteedSourceTrace(retrieved) {
   const conceptSeen = new Set();
   const concepts = [];
 
-  retrieved.topRecords.forEach(x => {
+  .sort((a, b) =>
+    (b.record.raw?.tracePriority || 0) -
+    (a.record.raw?.tracePriority || 0)
+  )
+  .forEach(x => {
     const title = String(x.record.title || "").trim();
     const key = normalize(title);
 
@@ -501,10 +504,11 @@ function buildGuaranteedSourceTrace(retrieved) {
 
     // Only authoritative Cortex RAG assets should appear as trace concepts.
     // This removes broad page/article objects such as "AI Terms Explained".
-    if (!ALLOWED_TRACE_SOURCES.has(x.record.sourceFile)) return;
+   if (!ALLOWED_TRACE_SOURCES.has(x.record.sourceFile)) return;
+if (x.record.raw?.allowTrace === false) return;
 
-    conceptSeen.add(key);
-    concepts.push(`- ${title}`);
+conceptSeen.add(key);
+concepts.push(`- ${title}`);
   });
 
   const relationshipSeen = new Set();
