@@ -42,6 +42,9 @@ const BLOCKED_TRACE_CONCEPTS = new Set([
   "about",
   "overview",
   "cortex dictionary",
+  "101 ai terms explained",
+  "multi agent systems",
+  "multi-agent systems",
   "site navigation",
   "navigation",
   "footer",
@@ -58,6 +61,9 @@ const BLOCKED_GOVERNANCE_SUBJECTS = new Set([
   "about",
   "overview",
   "cortex dictionary",
+  "101 ai terms explained",
+  "multi agent systems",
+  "multi-agent systems",
   "site navigation",
   "navigation",
   "footer",
@@ -477,18 +483,28 @@ function buildGuaranteedSourceTrace(retrieved) {
 
     if (!key || conceptSeen.has(key) || isBlockedTraceTitle(title)) return;
 
+    // Keep Source Trace focused on direct Cortex answer/governance concepts.
+    // Avoid broad page/article matches unless retrieval confidence is strong.
+    const isPrimarySource =
+      x.record.sourceFile === "ask-cortex-answers.json" ||
+      x.record.sourceFile === "governance-impact-map.json" ||
+      x.score >= 80;
+
+    if (!isPrimarySource) return;
+
     conceptSeen.add(key);
     concepts.push(`- ${title}`);
   });
 
   const relationships = retrieved.relationships
-    .slice(0, 5)
+    .slice(0, 4)
     .map(rel => `- ${rel.source} → ${rel.type || "related"} → ${rel.target}`)
     .join("\n") || "- No direct relationships found";
 
   const governance = retrieved.impacts
-    .slice(0, 4)
     .filter(impact => !isBlockedGovernanceSubject(impact.subject))
+    .filter(impact => impact.exact || impact.impactScore >= 80)
+    .slice(0, 3)
     .map(impact => {
       const values = Array.isArray(impact.values)
         ? impact.values.join(", ")
