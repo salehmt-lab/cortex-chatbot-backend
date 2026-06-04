@@ -51,7 +51,12 @@ const BLOCKED_TRACE_CONCEPTS = new Set([
   "hero",
   "call to action",
   "cta"
-]);
+
+  "ai terms explained",
+  "knowledge articles",
+  "knowledge hub",
+  "article learning paths",
+  "operations overview",]);
 
 const BLOCKED_GOVERNANCE_SUBJECTS = new Set([
   "contact",
@@ -70,6 +75,17 @@ const BLOCKED_GOVERNANCE_SUBJECTS = new Set([
   "hero",
   "call to action",
   "cta"
+
+  "ai terms explained",
+  "knowledge articles",
+  "knowledge hub",
+  "article learning paths",
+  "operations overview",]);
+
+const ALLOWED_TRACE_SOURCES = new Set([
+  "ask-cortex-answers.json",
+  "governance-impact-map.json",
+  "relationship-graph.json"
 ]);
 
 let cache = { loadedAt: 0, files: {}, records: [], errors: [] };
@@ -483,35 +499,47 @@ function buildGuaranteedSourceTrace(retrieved) {
 
     if (!key || conceptSeen.has(key) || isBlockedTraceTitle(title)) return;
 
-    // Keep Source Trace focused on direct Cortex answer/governance concepts.
-    // Avoid broad page/article matches unless retrieval confidence is strong.
-    const isPrimarySource =
-      x.record.sourceFile === "ask-cortex-answers.json" ||
-      x.record.sourceFile === "governance-impact-map.json" ||
-      x.score >= 80;
-
-    if (!isPrimarySource) return;
+    // Only authoritative Cortex answer/governance/relationship sources should appear as trace concepts.
+    // This prevents broad article/page records such as AI Terms Explained from polluting the Source Trace.
+    if (!ALLOWED_TRACE_SOURCES.has(x.record.sourceFile)) return;
 
     conceptSeen.add(key);
     concepts.push(`- ${title}`);
   });
 
-  const relationships = retrieved.relationships
-    .slice(0, 4)
-    .map(rel => `- ${rel.source} → ${rel.type || "related"} → ${rel.target}`)
-    .join("\n") || "- No direct relationships found";
+  const relationshipSeen = new Set();
+  const relationships = [];
 
-  const governance = retrieved.impacts
+  retrieved.relationships.forEach(rel => {
+    const source = String(rel.source || "").trim();
+    const target = String(rel.target || "").trim();
+    const type = String(rel.type || "related").trim();
+    const key = normalize(`${source} ${type} ${target}`);
+
+    if (!source || !target || relationshipSeen.has(key)) return;
+    relationshipSeen.add(key);
+    relationships.push(`- ${source} → ${type} → ${target}`);
+  });
+
+  const governanceSeen = new Set();
+  const governanceItems = [];
+
+  retrieved.impacts
     .filter(impact => !isBlockedGovernanceSubject(impact.subject))
     .filter(impact => impact.exact || impact.impactScore >= 80)
-    .slice(0, 3)
-    .map(impact => {
+    .forEach(impact => {
+      const subject = String(impact.subject || "").trim();
+      const key = normalize(subject);
+
+      if (!subject || governanceSeen.has(key)) return;
+      governanceSeen.add(key);
+
       const values = Array.isArray(impact.values)
         ? impact.values.join(", ")
         : String(impact.values);
-      return `- ${impact.subject}: ${values}`;
-    })
-    .join("\n") || "- No governance impacts found";
+
+      governanceItems.push(`- ${subject}: ${values}`);
+    });
 
   const sourceSeen = new Set();
   const sources = [];
@@ -519,6 +547,10 @@ function buildGuaranteedSourceTrace(retrieved) {
   retrieved.topRecords.forEach(x => {
     const source = x.record.sourceFile;
     if (!source || sourceSeen.has(source)) return;
+
+    // Keep listed sources aligned to authoritative trace material first.
+    if (!ALLOWED_TRACE_SOURCES.has(source) && sources.length > 0) return;
+
     sourceSeen.add(source);
     sources.push(`- ${source}`);
   });
@@ -533,10 +565,10 @@ Concepts:
 ${concepts.slice(0, 5).join("\n") || "- No direct concepts found"}
 
 Relationships:
-${relationships}
+${relationships.slice(0, 4).join("\n") || "- No direct relationships found"}
 
 Governance:
-${governance}
+${governanceItems.slice(0, 3).join("\n") || "- No governance impacts found"}
 
 Sources:
 ${sources.slice(0, 6).join("\n") || "- No source files found"}
@@ -544,7 +576,6 @@ ${sources.slice(0, 6).join("\n") || "- No source files found"}
 Confidence:
 ${confidence}%`;
 }
-
 function removeModelSourceTrace(reply) {
   return String(reply || "")
     .replace(/\nSource Trace[\s\S]*$/i, "")
