@@ -26,20 +26,15 @@ const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const DATA_BASE = "https://nabds.ai/cortex/data/";
 
 const DATA_FILES = [
-  "search-index-v2.json",
   "ask-cortex-answers.json",
-  "cortex-items.json",
   "relationship-graph.json",
   "governance-impact-map.json",
-  "knowledge-graph-v2.json"
+  "cortex-items.json",
+  "knowledge-graph-v2.json",
+  "search-index-v2.json"
 ];
 
-let cache = {
-  loadedAt: 0,
-  files: {},
-  records: []
-};
-
+let cache = { loadedAt: 0, files: {}, records: [] };
 const CACHE_TTL = 10 * 60 * 1000;
 
 function normalize(value) {
@@ -52,6 +47,10 @@ function normalize(value) {
 function tokens(value) {
   const text = normalize(value);
   return text ? text.split(/\s+/).filter(t => t.length > 1) : [];
+}
+
+function isHealthcareQuery(query) {
+  return /\b(healthcare|hospital|clinical|patient|doctor|nurse|care|medical|health|command center)\b/i.test(query);
 }
 
 function recordText(record) {
@@ -133,9 +132,7 @@ async function loadCortexData() {
     try {
       const response = await fetch(`${DATA_BASE}${fileName}?v=${Date.now()}`);
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const data = await response.json();
       files[fileName] = data;
@@ -145,12 +142,7 @@ async function loadCortexData() {
     }
   }
 
-  cache = {
-    loadedAt: now,
-    files,
-    records,
-    errors
-  };
+  cache = { loadedAt: now, files, records, errors };
 
   console.log(`Loaded Cortex RAG data: ${Object.keys(files).length} files, ${records.length} records`);
 
@@ -163,37 +155,59 @@ async function loadCortexData() {
 
 function score(record, query) {
   const qTokens = tokens(query);
+  const phrase = normalize(query);
   const haystack = normalize(`${record.title} ${record.text} ${record.sourceFile}`);
   const title = normalize(record.title);
 
   let value = 0;
 
+  if (title === phrase) value += 100;
+  if (title.includes(phrase)) value += 55;
+  if (phrase.includes(title) && title.length > 2) value += 35;
+
   qTokens.forEach(token => {
-    if (title.includes(token)) value += 8;
+    if (title === token) value += 35;
+    if (title.includes(token)) value += 15;
     if (haystack.includes(token)) value += 3;
   });
 
-  const phrase = normalize(query);
+  if (record.sourceFile === "ask-cortex-answers.json") value += 18;
+  if (record.sourceFile === "governance-impact-map.json") value += 12;
+  if (record.sourceFile === "relationship-graph.json") value += 8;
+  if (record.sourceFile === "cortex-items.json") value += 6;
+  if (record.sourceFile === "knowledge-graph-v2.json") value += 5;
+  if (record.sourceFile === "search-index-v2.json") value += 1;
 
-  if (phrase && title.includes(phrase)) value += 20;
-  if (phrase && haystack.includes(phrase)) value += 10;
-
-  if (record.sourceFile === "ask-cortex-answers.json") value += 4;
-  if (record.sourceFile === "search-index-v2.json") value += 3;
-  if (record.sourceFile === "relationship-graph.json") value += 2;
-  if (record.sourceFile === "governance-impact-map.json") value += 2;
+  if (!isHealthcareQuery(query) && /healthcare|hospital|clinical|patient|medical|health/i.test(haystack)) {
+    value -= 35;
+  }
 
   return value;
+}
+
+function dedupeRecords(items) {
+  const seen = new Set();
+  const result = [];
+
+  for (const item of items) {
+    const key = normalize(item.record.title);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+
+  return result;
 }
 
 function retrieve(query, cortexData) {
   const qTokens = tokens(query);
 
-  const topRecords = cortexData.records
+  const scored = cortexData.records
     .map(record => ({ record, score: score(record, query) }))
     .filter(item => item.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 10);
+    .sort((a, b) => b.score - a.score);
+
+  const topRecords = dedupeRecords(scored).slice(0, 10);
 
   const selected = new Set();
 
@@ -204,14 +218,30 @@ function retrieve(query, cortexData) {
   });
 
   const relationships = Array.isArray(cortexData.files["relationship-graph.json"])
-    ? cortexData.files["relationship-graph.json"].filter(rel => {
+    ? cortexData.files["relationship-graph.json"]
+      .map(rel => {
         const source = normalize(rel.source);
         const target = normalize(rel.target);
+        let relScore = 0;
 
-        return selected.has(source) ||
-          selected.has(target) ||
-          qTokens.some(token => source.includes(token) || target.includes(token));
-      }).slice(0, 10)
+        if (selected.has(source)) relScore += 40;
+        if (selected.has(target)) relScore += 40;
+
+        qTokens.forEach(token => {
+          if (source.includes(token)) relScore += 20;
+          if (target.includes(token)) relScore += 20;
+        });
+
+        if (!isHealthcareQuery(query) && /healthcare|hospital|clinical|patient|medical|health/i.test(`${rel.source} ${rel.target}`)) {
+          relScore -= 40;
+        }
+
+        return { rel, relScore };
+      })
+      .filter(item => item.relScore > 0)
+      .sort((a, b) => b.relScore - a.relScore)
+      .slice(0, 8)
+      .map(item => item.rel)
     : [];
 
   const impactMap = cortexData.files["governance-impact-map.json"] || {};
@@ -219,26 +249,34 @@ function retrieve(query, cortexData) {
 
   Object.entries(impactMap).forEach(([key, value]) => {
     const keyNorm = normalize(key);
+    let impactScore = 0;
 
-    if (selected.has(keyNorm) || qTokens.some(token => keyNorm.includes(token))) {
-      impacts.push({
-        subject: key,
-        values: value
-      });
+    if (selected.has(keyNorm)) impactScore += 60;
+
+    qTokens.forEach(token => {
+      if (keyNorm.includes(token)) impactScore += 30;
+    });
+
+    if (!isHealthcareQuery(query) && /healthcare|hospital|clinical|patient|medical|health/i.test(key)) {
+      impactScore -= 40;
+    }
+
+    if (impactScore > 0) {
+      impacts.push({ subject: key, values: value, impactScore });
     }
   });
+
+  impacts.sort((a, b) => b.impactScore - a.impactScore);
 
   return {
     topRecords,
     relationships,
-    impacts: impacts.slice(0, 8)
+    impacts: impacts.slice(0, 6)
   };
 }
 
 function buildContext(retrieved) {
-  const lines = [];
-
-  lines.push("RETRIEVED CORTEX KNOWLEDGE:");
+  const lines = ["RETRIEVED CORTEX KNOWLEDGE:"];
 
   retrieved.topRecords.forEach(({ record, score }, index) => {
     const raw = record.raw || {};
@@ -266,7 +304,6 @@ function buildContext(retrieved) {
 
   if (retrieved.relationships.length) {
     lines.push("\nRELATED CORTEX RELATIONSHIPS:");
-
     retrieved.relationships.forEach((rel, index) => {
       lines.push(`[R${index + 1}] ${rel.source} -> ${rel.type || "related"} -> ${rel.target}`);
     });
@@ -274,7 +311,6 @@ function buildContext(retrieved) {
 
   if (retrieved.impacts.length) {
     lines.push("\nGOVERNANCE IMPACTS:");
-
     retrieved.impacts.forEach((impact, index) => {
       const values = Array.isArray(impact.values) ? impact.values.join(", ") : String(impact.values);
       lines.push(`[G${index + 1}] ${impact.subject}: ${values}`);
@@ -312,7 +348,7 @@ function buildGuaranteedSourceTrace(retrieved) {
     .map(source => `- ${source}`)
     .join("\n") || "- No source files found";
 
-  const confidence = Math.min(95, 70 + (retrieved.topRecords.length * 4));
+  const confidence = Math.min(95, 65 + (retrieved.topRecords.length * 3));
 
   return `
 
@@ -343,9 +379,7 @@ function removeModelSourceTrace(reply) {
 const systemPrompt = `
 You are Cortex AI, the source-grounded assistant for NABDs.AI Cortex 10.
 
-Cortex 10 is an Enterprise Intelligence Operating System for governed enterprise AI knowledge, context architecture, agentic AI, AI governance, healthcare AI, executive intelligence, learning, operations, semantic search, and relationship tracing.
-
-Use the retrieved Cortex knowledge provided in the user message whenever it is relevant.
+Use retrieved Cortex knowledge when relevant.
 
 Rules:
 - Start with a direct answer.
@@ -377,10 +411,7 @@ app.get("/health", async (req, res) => {
       errors: cortexData.errors || []
     });
   } catch (error) {
-    res.status(500).json({
-      status: "error",
-      error: error.message
-    });
+    res.status(500).json({ status: "error", error: error.message });
   }
 });
 
@@ -389,9 +420,7 @@ app.post("/chat", async (req, res) => {
     const userMessage = req.body?.message;
 
     if (!userMessage || typeof userMessage !== "string") {
-      return res.status(400).json({
-        error: "Message is required."
-      });
+      return res.status(400).json({ error: "Message is required." });
     }
 
     const cortexData = await loadCortexData();
@@ -401,10 +430,7 @@ app.post("/chat", async (req, res) => {
     const response = await client.responses.create({
       model,
       input: [
-        {
-          role: "system",
-          content: systemPrompt
-        },
+        { role: "system", content: systemPrompt },
         {
           role: "user",
           content:
@@ -419,10 +445,8 @@ app.post("/chat", async (req, res) => {
       response.output_text || "I am sorry, I could not generate a response."
     );
 
-    const guaranteedTrace = buildGuaranteedSourceTrace(retrieved);
-
     res.json({
-      reply: cleanReply + guaranteedTrace,
+      reply: cleanReply + buildGuaranteedSourceTrace(retrieved),
       sources: retrieved.topRecords.slice(0, 6).map(({ record, score }) => ({
         title: record.title,
         sourceFile: record.sourceFile,
@@ -435,10 +459,7 @@ app.post("/chat", async (req, res) => {
     });
   } catch (error) {
     console.error("Chat error:", error);
-
-    res.status(500).json({
-      error: "Cortex RAG chatbot backend error."
-    });
+    res.status(500).json({ error: "Cortex RAG chatbot backend error." });
   }
 });
 
