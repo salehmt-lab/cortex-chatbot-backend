@@ -131,7 +131,6 @@ async function loadCortexData() {
   for (const fileName of DATA_FILES) {
     try {
       const response = await fetch(`${DATA_BASE}${fileName}?v=${Date.now()}`);
-
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const data = await response.json();
@@ -143,12 +142,7 @@ async function loadCortexData() {
   }
 
   cache = { loadedAt: now, files, records, errors };
-
   console.log(`Loaded Cortex RAG data: ${Object.keys(files).length} files, ${records.length} records`);
-
-  if (errors.length) {
-    console.warn("Cortex data loading warnings:", errors.join(" | "));
-  }
 
   return cache;
 }
@@ -161,25 +155,25 @@ function score(record, query) {
 
   let value = 0;
 
-  if (title === phrase) value += 100;
-  if (title.includes(phrase)) value += 55;
-  if (phrase.includes(title) && title.length > 2) value += 35;
+  if (title === phrase) value += 120;
+  if (title.includes(phrase)) value += 60;
+  if (phrase.includes(title) && title.length > 2) value += 40;
 
   qTokens.forEach(token => {
-    if (title === token) value += 35;
-    if (title.includes(token)) value += 15;
+    if (title === token) value += 50;
+    if (title.includes(token)) value += 18;
     if (haystack.includes(token)) value += 3;
   });
 
-  if (record.sourceFile === "ask-cortex-answers.json") value += 18;
-  if (record.sourceFile === "governance-impact-map.json") value += 12;
+  if (record.sourceFile === "ask-cortex-answers.json") value += 25;
+  if (record.sourceFile === "governance-impact-map.json") value += 18;
   if (record.sourceFile === "relationship-graph.json") value += 8;
   if (record.sourceFile === "cortex-items.json") value += 6;
   if (record.sourceFile === "knowledge-graph-v2.json") value += 5;
-  if (record.sourceFile === "search-index-v2.json") value += 1;
+  if (record.sourceFile === "search-index-v2.json") value -= 5;
 
   if (!isHealthcareQuery(query) && /healthcare|hospital|clinical|patient|medical|health/i.test(haystack)) {
-    value -= 35;
+    value -= 60;
   }
 
   return value;
@@ -199,15 +193,65 @@ function dedupeRecords(items) {
   return result;
 }
 
+function findExactAskCortexMatches(query, cortexData) {
+  const qTokens = tokens(query);
+  const answers = cortexData.files["ask-cortex-answers.json"];
+
+  if (!Array.isArray(answers)) return [];
+
+  return answers
+    .filter(item => {
+      const concept = normalize(item.concept || item.title || item.name);
+      return qTokens.some(token => concept === token) || normalize(query).includes(concept);
+    })
+    .map(item => ({
+      record: {
+        sourceFile: "ask-cortex-answers.json",
+        title: item.concept || item.title || item.name,
+        type: "concept_answer",
+        domain: "Cortex",
+        raw: item,
+        text: recordText(item)
+      },
+      score: 999
+    }));
+}
+
+function findExactGovernanceMatches(query, cortexData) {
+  const qTokens = tokens(query);
+  const impactMap = cortexData.files["governance-impact-map.json"] || {};
+  const matches = [];
+
+  Object.entries(impactMap).forEach(([key, value]) => {
+    const keyNorm = normalize(key);
+    const isMatch =
+      qTokens.some(token => keyNorm === token) ||
+      normalize(query).includes(keyNorm);
+
+    if (isMatch) {
+      matches.push({
+        subject: key,
+        values: value,
+        impactScore: 999
+      });
+    }
+  });
+
+  return matches;
+}
+
 function retrieve(query, cortexData) {
   const qTokens = tokens(query);
+
+  const exactAskMatches = findExactAskCortexMatches(query, cortexData);
+  const exactGovernanceMatches = findExactGovernanceMatches(query, cortexData);
 
   const scored = cortexData.records
     .map(record => ({ record, score: score(record, query) }))
     .filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score);
 
-  const topRecords = dedupeRecords(scored).slice(0, 10);
+  const topRecords = dedupeRecords([...exactAskMatches, ...scored]).slice(0, 10);
 
   const selected = new Set();
 
@@ -217,6 +261,8 @@ function retrieve(query, cortexData) {
     if (record.raw?.name) selected.add(normalize(record.raw.name));
   });
 
+  qTokens.forEach(token => selected.add(token));
+
   const relationships = Array.isArray(cortexData.files["relationship-graph.json"])
     ? cortexData.files["relationship-graph.json"]
       .map(rel => {
@@ -224,16 +270,18 @@ function retrieve(query, cortexData) {
         const target = normalize(rel.target);
         let relScore = 0;
 
-        if (selected.has(source)) relScore += 40;
-        if (selected.has(target)) relScore += 40;
+        if (selected.has(source)) relScore += 60;
+        if (selected.has(target)) relScore += 60;
 
         qTokens.forEach(token => {
+          if (source === token) relScore += 80;
+          if (target === token) relScore += 80;
           if (source.includes(token)) relScore += 20;
           if (target.includes(token)) relScore += 20;
         });
 
         if (!isHealthcareQuery(query) && /healthcare|hospital|clinical|patient|medical|health/i.test(`${rel.source} ${rel.target}`)) {
-          relScore -= 40;
+          relScore -= 80;
         }
 
         return { rel, relScore };
@@ -245,34 +293,40 @@ function retrieve(query, cortexData) {
     : [];
 
   const impactMap = cortexData.files["governance-impact-map.json"] || {};
-  const impacts = [];
+  const broadImpacts = [];
 
   Object.entries(impactMap).forEach(([key, value]) => {
     const keyNorm = normalize(key);
     let impactScore = 0;
 
-    if (selected.has(keyNorm)) impactScore += 60;
+    if (selected.has(keyNorm)) impactScore += 80;
 
     qTokens.forEach(token => {
-      if (keyNorm.includes(token)) impactScore += 30;
+      if (keyNorm === token) impactScore += 100;
+      if (keyNorm.includes(token)) impactScore += 25;
     });
 
     if (!isHealthcareQuery(query) && /healthcare|hospital|clinical|patient|medical|health/i.test(key)) {
-      impactScore -= 40;
+      impactScore -= 80;
     }
 
     if (impactScore > 0) {
-      impacts.push({ subject: key, values: value, impactScore });
+      broadImpacts.push({ subject: key, values: value, impactScore });
     }
   });
 
-  impacts.sort((a, b) => b.impactScore - a.impactScore);
+  const impactSeen = new Set();
+  const impacts = [...exactGovernanceMatches, ...broadImpacts]
+    .sort((a, b) => b.impactScore - a.impactScore)
+    .filter(item => {
+      const key = normalize(item.subject);
+      if (impactSeen.has(key)) return false;
+      impactSeen.add(key);
+      return true;
+    })
+    .slice(0, 6);
 
-  return {
-    topRecords,
-    relationships,
-    impacts: impacts.slice(0, 6)
-  };
+  return { topRecords, relationships, impacts };
 }
 
 function buildContext(retrieved) {
@@ -280,7 +334,6 @@ function buildContext(retrieved) {
 
   retrieved.topRecords.forEach(({ record, score }, index) => {
     const raw = record.raw || {};
-
     const content = [
       raw.summary,
       raw.answer,
@@ -320,11 +373,22 @@ function buildContext(retrieved) {
   return lines.join("\n\n").slice(0, 14000);
 }
 
+function cleanConceptTitle(title) {
+  return String(title || "").trim();
+}
+
 function buildGuaranteedSourceTrace(retrieved) {
-  const concepts = retrieved.topRecords
-    .slice(0, 5)
-    .map(x => `- ${x.record.title}`)
-    .join("\n") || "- No direct concepts found";
+  const conceptSeen = new Set();
+  const concepts = [];
+
+  retrieved.topRecords.forEach(x => {
+    const title = cleanConceptTitle(x.record.title);
+    const key = normalize(title);
+
+    if (!key || conceptSeen.has(key)) return;
+    conceptSeen.add(key);
+    concepts.push(`- ${title}`);
+  });
 
   const relationships = retrieved.relationships
     .slice(0, 5)
@@ -355,7 +419,7 @@ function buildGuaranteedSourceTrace(retrieved) {
 Source Trace
 ------------
 Concepts:
-${concepts}
+${concepts.slice(0, 5).join("\n") || "- No direct concepts found"}
 
 Relationships:
 ${relationships}
